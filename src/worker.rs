@@ -7,7 +7,7 @@ use chan::{ Sender, Receiver };
 
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
-    Map(PathBuf),
+    Map((i32, PathBuf)),
     Reduce((i32, Vec<PathBuf>))
 }
 
@@ -18,7 +18,6 @@ enum JobResult {
 }
 
 struct Worker {
-    id: i32,
     working_directory: PathBuf,
     map: Box<Fn(BufReader<File>) -> Vec<String> + Send>,
     reduce: Box<Fn(Vec<BufReader<File>>) -> String + Send>,
@@ -30,11 +29,11 @@ impl Worker {
     fn run(&self) {
         for job in self.job_queue.iter() {
             match job {
-                Job::Map(path) => {
+                Job::Map((job_id, path)) => {
                     let results: Vec<String> = (self.map)(open_file(path));
-                    let names = self.map_result_names(results.iter().len());
+                    let names = self.map_result_names(&job_id, results.iter().len());
                     self.write_map_results(names, results);
-                    self.results_queue.send(JobResult::MapFinished(self.id));
+                    self.results_queue.send(JobResult::MapFinished(job_id));
                 }
                 Job::Reduce((job_id, paths)) => {
                     let files = paths.into_iter()
@@ -43,16 +42,16 @@ impl Worker {
                     let result: String = (self.reduce)(files);
                     let name = self.reduce_result_name(&job_id);
                     self.write_reduce_results(name, result);
-                    self.results_queue.send(JobResult::ReduceFinished(self.id));
+                    self.results_queue.send(JobResult::ReduceFinished(job_id));
                 }
             }
         }
     }
 
-    fn map_result_names(&self, length: usize) -> Vec<PathBuf> {
+    fn map_result_names(&self, job_id: &i32, length: usize) -> Vec<PathBuf> {
         (1..length + 1).map(|i| {
                        let mut path = self.working_directory.clone();
-                       path.push(format!("worker.{}.reduce.{}", self.id, i));
+                       path.push(format!("map.{}.reduce.{}", job_id, i));
                        path
                    })
                    .collect::<Vec<PathBuf>>()
@@ -67,7 +66,7 @@ impl Worker {
 
     fn reduce_result_name(&self, job_id: &i32) -> PathBuf {
         let mut path = self.working_directory.clone();
-        path.push(format!("worker.{}.result.{}", self.id, job_id));
+        path.push(format!("reduce.{}.result", job_id));
         path
     }
 
@@ -118,7 +117,6 @@ mod test {
         let (results_send, results_recv) = chan::async();
 
         let worker = Worker {
-            id: 1,
             working_directory: working_directory.clone(),
             map: Box::new(map_fn),
             reduce: Box::new(reduce_fn),
@@ -130,16 +128,16 @@ mod test {
             worker.run()
         );
 
-        work_send.send(Job::Map(map_file.clone()));
+        work_send.send(Job::Map((1, map_file.clone())));
         let done = results_recv.recv();
         drop(work_send);
         drop(results_recv);
 
         assert_eq!(done, Some(JobResult::MapFinished(1)));
-        let expected_files = vec!["worker.1.reduce.1",
-                                  "worker.1.reduce.2",
-                                  "worker.1.reduce.3",
-                                  "worker.1.reduce.4"
+        let expected_files = vec!["map.1.reduce.1",
+                                  "map.1.reduce.2",
+                                  "map.1.reduce.3",
+                                  "map.1.reduce.4"
                                  ];
 
         let contents = expected_files.iter()
@@ -173,7 +171,7 @@ mod test {
         let working_directory = PathBuf::from("./test-data/worker_reduces_input_to_test_file");
         let reduce_files = (1..5).map(|i| {
                                      let mut path = working_directory.clone();
-                                     path.push(format!("worker.{}.reduce.2", i));
+                                     path.push(format!("map.{}.reduce.2", i));
                                      path
                                  })
                                  .collect::<Vec<PathBuf>>();
@@ -189,7 +187,6 @@ mod test {
         let (results_send, results_recv) = chan::async();
 
         let worker = Worker {
-            id: 1,
             working_directory: working_directory.clone(),
             map: Box::new(map_fn),
             reduce: Box::new(reduce_fn),
@@ -206,10 +203,10 @@ mod test {
         drop(work_send);
         drop(results_recv);
 
-        assert_eq!(done, Some(JobResult::ReduceFinished(1)));
+        assert_eq!(done, Some(JobResult::ReduceFinished(2)));
 
         let mut reduce_file = working_directory.clone();
-        reduce_file.push("worker.1.result.2");
+        reduce_file.push("reduce.2.result");
         {
             let f = OpenOptions::new()
                                 .read(true)
@@ -222,6 +219,6 @@ mod test {
             assert_eq!(contents, vec!["1234".to_string()]);
         }
 
-        remove_file(reduce_file);
+        let _ = remove_file(reduce_file);
     }
 }
