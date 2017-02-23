@@ -8,7 +8,7 @@ use chan::{ Sender, Receiver };
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Map(PathBuf),
-    Reduce(Vec<PathBuf>)
+    Reduce((i32, Vec<PathBuf>))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -36,7 +36,14 @@ impl Worker {
                     self.write_map_results(names, results);
                     self.results_queue.send(JobResult::MapFinished(self.id));
                 }
-                Job::Reduce(paths) => {
+                Job::Reduce((job_id, paths)) => {
+                    let files = paths.into_iter()
+                                     .map(|path| open_file(path))
+                                     .collect::<Vec<BufReader<File>>>();
+                    let result: String = (self.reduce)(files);
+                    let name = self.reduce_result_name(&job_id);
+                    self.write_reduce_results(name, result);
+                    self.results_queue.send(JobResult::ReduceFinished(self.id));
                 }
             }
         }
@@ -56,6 +63,17 @@ impl Worker {
             let mut f = File::create(filename).unwrap();
             let _ = f.write_all(&result.as_bytes());
         }
+    }
+
+    fn reduce_result_name(&self, job_id: &i32) -> PathBuf {
+        let mut path = self.working_directory.clone();
+        path.push(format!("worker.{}.result.{}", self.id, job_id));
+        path
+    }
+
+    fn write_reduce_results(&self, name: PathBuf, result: String) {
+        let mut f = File::create(name).unwrap();
+        let _ = f.write_all(&result.as_bytes());
     }
 }
 
@@ -128,7 +146,6 @@ mod test {
                                      .flat_map(|name| {
                                         let mut path = working_directory.clone();
                                         path.push(name);
-                                        println!("READ PATH: {}", path.to_str().unwrap());
                                         let contents;
                                         {
                                             let f = OpenOptions::new()
@@ -149,5 +166,62 @@ mod test {
             path.push(name);
             let _ = remove_file(path);
         }
+    }
+
+    #[test]
+    fn worker_reduces_input_to_result_file() {
+        let working_directory = PathBuf::from("./test-data/worker_reduces_input_to_test_file");
+        let reduce_files = (1..5).map(|i| {
+                                     let mut path = working_directory.clone();
+                                     path.push(format!("worker.{}.reduce.2", i));
+                                     path
+                                 })
+                                 .collect::<Vec<PathBuf>>();
+
+        fn map_fn(input: BufReader<File>) -> Vec<String> {
+            vec!["1", "2", "3", "4"].iter().map(|s| s.to_string()).collect()
+        };
+        fn reduce_fn(input: Vec<BufReader<File>>) -> String {
+            "1234".to_string()
+        };
+
+        let (work_send, work_recv) = chan::async();
+        let (results_send, results_recv) = chan::async();
+
+        let worker = Worker {
+            id: 1,
+            working_directory: working_directory.clone(),
+            map: Box::new(map_fn),
+            reduce: Box::new(reduce_fn),
+            job_queue: work_recv,
+            results_queue: results_send
+        };
+
+        thread::spawn(move ||
+            worker.run()
+        );
+
+        work_send.send(Job::Reduce((2, reduce_files)));
+        let done = results_recv.recv();
+        drop(work_send);
+        drop(results_recv);
+
+        assert_eq!(done, Some(JobResult::ReduceFinished(1)));
+
+        let mut reduce_file = working_directory.clone();
+        reduce_file.push("worker.1.result.2");
+        {
+            let f = OpenOptions::new()
+                                .read(true)
+                                .open(&reduce_file)
+                                .unwrap();
+            let contents = BufReader::new(f).lines()
+                                            .map(|l| l.unwrap_or("".to_string()))
+                                            .collect::<Vec<String>>();
+
+            assert_eq!(contents, vec!["1234".to_string()]);
+        }
+
+        remove_file(reduce_file);
     }
 }
