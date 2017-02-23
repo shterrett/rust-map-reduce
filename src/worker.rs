@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use chan::{ Sender, Receiver };
 
 #[derive(Debug, PartialEq, Eq)]
-enum Job {
+pub enum Job {
     Map((i32, PathBuf)),
     Reduce((i32, Vec<PathBuf>))
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum JobResult {
+pub enum JobResult {
     MapFinished(i32),
     ReduceFinished(i32)
 }
@@ -100,18 +100,19 @@ mod test {
                  JobResult
                };
 
+    fn map_fn(input: BufReader<File>) -> Vec<String> {
+        vec!["1", "2", "3", "4"].iter().map(|s| s.to_string()).collect()
+    }
+    fn reduce_fn(input: Vec<BufReader<File>>) -> String {
+        "1234".to_string()
+    }
+
+
     #[test]
     fn worker_maps_input_to_result_files() {
         let working_directory = PathBuf::from("./test-data/worker_maps_input_to_result_files");
         let mut map_file = working_directory.clone();
         map_file.push("input_file");
-
-        fn map_fn(input: BufReader<File>) -> Vec<String> {
-            vec!["1", "2", "3", "4"].iter().map(|s| s.to_string()).collect()
-        };
-        fn reduce_fn(input: Vec<BufReader<File>>) -> String {
-            "1234".to_string()
-        };
 
         let (work_send, work_recv) = chan::async();
         let (results_send, results_recv) = chan::async();
@@ -176,12 +177,6 @@ mod test {
                                  })
                                  .collect::<Vec<PathBuf>>();
 
-        fn map_fn(input: BufReader<File>) -> Vec<String> {
-            vec!["1", "2", "3", "4"].iter().map(|s| s.to_string()).collect()
-        };
-        fn reduce_fn(input: Vec<BufReader<File>>) -> String {
-            "1234".to_string()
-        };
 
         let (work_send, work_recv) = chan::async();
         let (results_send, results_recv) = chan::async();
