@@ -40,13 +40,15 @@ impl Master {
         }
     }
 
-    fn do_map(&self) {
+    fn do_map(&self) -> i32 {
         for (index, input) in self.input_files.iter().enumerate() {
             self.job_queue.send(Job::Map(((index + 1) as i32, input.clone())));
         }
+
+        self.input_files.iter().len() as i32
     }
 
-    fn do_reduce(&self) {
+    fn do_reduce(&self) -> i32 {
         if let Ok(entries) = read_dir(self.working_directory.clone()) {
             let groups = entries.filter_map(|entry| entry.ok())
                                 .fold(HashMap::new(), |mut grouped, entry| {
@@ -65,9 +67,13 @@ impl Master {
                                                  });
                                     grouped
                                 });
+            let n_reduce_jobs = groups.iter().len();
             for (index, group) in groups {
                 self.job_queue.send(Job::Reduce(((index + 1), group)));
             }
+            n_reduce_jobs as i32
+        } else {
+            0
         }
     }
 }
@@ -109,13 +115,14 @@ mod test {
             job_recv.iter().collect::<Vec<Job>>()
         });
 
-        master.do_map();
+        let n_map_jobs = master.do_map();
         drop(master);
 
         let expected_jobs = input_files.iter()
                                        .enumerate()
                                        .map(|(i, f)| Job::Map(((i + 1) as i32, f.clone())))
                                        .collect::<Vec<Job>>();
+        assert_eq!(n_map_jobs, 4);
         assert_eq!(map_jobs.join().unwrap(), expected_jobs);
     }
 
@@ -151,7 +158,7 @@ mod test {
                     })
         });
 
-        master.do_reduce();
+        let n_reduce_jobs = master.do_reduce();
         drop(master);
 
         let expected_jobs = (1..(4 + 1)).map(|reduce_id| {
@@ -174,6 +181,7 @@ mod test {
               }
           });
 
+        assert_eq!(n_reduce_jobs, 4);
         assert_eq!(reduce_jobs.join().unwrap(), expected_jobs);
     }
 }
