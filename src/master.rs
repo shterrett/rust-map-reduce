@@ -3,15 +3,17 @@ use std::io::BufReader;
 use std::fs::{ File, read_dir };
 use std::str::FromStr;
 use std::collections::HashMap;
-use worker::{ Job, JobResult };
+use std::sync::Arc;
+use std::thread;
 use chan;
 use chan::{ Sender, Receiver };
+use worker::{ Job, JobResult, Worker };
 
 struct Master {
     input_files: Vec<PathBuf>,
     working_directory: PathBuf,
-    map: Box<Fn(BufReader<File>) -> Vec<String> + Send>,
-    reduce: Box<Fn(Vec<BufReader<File>>) -> String + Send>,
+    map: Arc<Fn(BufReader<File>) -> Vec<String> + Send + Sync>,
+    reduce: Arc<Fn(Vec<BufReader<File>>) -> String + Send + Sync>,
     job_queue: Sender<Job>,
     results_queue: Receiver<JobResult>,
     worker_job_queue: Receiver<Job>,
@@ -21,8 +23,8 @@ struct Master {
 impl Master {
     fn new(working_directory: PathBuf,
            input_files: Vec<PathBuf>,
-           map: Box<Fn(BufReader<File>) -> Vec<String> + Send>,
-           reduce: Box<Fn(Vec<BufReader<File>>) -> String + Send>
+           map: Arc<Fn(BufReader<File>) -> Vec<String> + Send + Sync>,
+           reduce: Arc<Fn(Vec<BufReader<File>>) -> String + Send + Sync>
            ) -> Self
     {
         let (work_send, work_recv) = chan::async();
@@ -69,21 +71,88 @@ impl Master {
                                 });
             let n_reduce_jobs = groups.iter().len();
             for (index, group) in groups {
-                self.job_queue.send(Job::Reduce(((index + 1), group)));
+                self.job_queue.send(Job::Reduce((index, group)));
             }
             n_reduce_jobs as i32
         } else {
             0
         }
     }
+
+    fn run(&self, n_workers: i32) -> Vec<PathBuf> {
+        self.spawn_workers(n_workers);
+
+        let n_map = self.do_map();
+        self.wait_for_completion(n_map);
+        let n_reduce = self.do_reduce();
+        self.wait_for_completion(n_reduce);
+
+        self.aggregate_result_files()
+    }
+
+    fn spawn_workers(&self, n_workers: i32) {
+        for _ in 0..n_workers {
+            let working_directory = self.working_directory.clone();
+            let map = self.map.clone();
+            let reduce = self.reduce.clone();
+            let job_queue = self.worker_job_queue.clone();
+            let results_queue = self.worker_results_queue.clone();
+
+            thread::spawn(move || {
+                let worker = Worker {
+                    working_directory: working_directory,
+                    map: map,
+                    reduce: reduce,
+                    job_queue: job_queue,
+                    results_queue: results_queue
+                };
+                worker.run()
+            });
+        }
+    }
+
+    fn wait_for_completion(&self, n_jobs: i32) {
+        let mut n_complete = 0;
+        while n_complete < n_jobs {
+            self.results_queue.recv()
+                              .map(|result| {
+                                  println!("{:?}", result);
+                                  n_complete += 1
+                              });
+        }
+    }
+
+    fn aggregate_result_files(&self) -> Vec<PathBuf> {
+        read_dir(self.working_directory.clone())
+            .map(|entries| {
+                entries.filter_map(|entry| entry.ok())
+                       .filter_map(|entry| {
+                           entry.file_name()
+                                .into_string()
+                                .ok()
+                                .and_then(|name| {
+                                    match name.split(".").last() {
+                                        Some("result") => Some(entry),
+                                        _ => None
+                                    }
+                                })
+
+                       })
+                       .map(|entry| entry.path())
+                       .collect::<Vec<PathBuf>>()
+            })
+            .unwrap_or(vec![])
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use std::io::BufReader;
+    use std::fs::OpenOptions;
+    use std::io::{ Write, BufRead, BufReader };
     use std::path::PathBuf;
-    use std::fs::File ;
+    use std::fs::{ File, remove_file };
     use std::thread;
+    use std::sync::Arc;
     use super::Master;
     use worker::{ Job, JobResult };
 
@@ -106,8 +175,8 @@ mod test {
             .collect::<Vec<PathBuf>>();
         let master = Master::new(working_directory.clone(),
                                  input_files.clone(),
-                                 Box::new(map_fn),
-                                 Box::new(reduce_fn)
+                                 Arc::new(map_fn),
+                                 Arc::new(reduce_fn)
                                 );
 
         let job_recv = master.worker_job_queue.clone();
@@ -138,8 +207,8 @@ mod test {
             .collect::<Vec<PathBuf>>();
         let master = Master::new(working_directory.clone(),
                                  input_files,
-                                 Box::new(map_fn),
-                                 Box::new(reduce_fn)
+                                 Arc::new(map_fn),
+                                 Arc::new(reduce_fn)
                                 );
 
         let job_recv = master.worker_job_queue.clone();
@@ -183,5 +252,60 @@ mod test {
 
         assert_eq!(n_reduce_jobs, 4);
         assert_eq!(reduce_jobs.join().unwrap(), expected_jobs);
+    }
+
+    #[test]
+    fn run_map_reduce() {
+        let working_directory = PathBuf::from("./test-data/master_runs_map_reduce");
+        let input_files = vec!["input_1", "input_2", "input_3", "input_4"].into_iter()
+            .map(|filename| {
+                let mut path = working_directory.clone();
+                path.push(filename);
+                path
+            })
+            .collect::<Vec<PathBuf>>();
+        let master = Master::new(working_directory.clone(),
+                                 input_files.clone(),
+                                 Arc::new(map_fn),
+                                 Arc::new(reduce_fn)
+                                );
+
+        let result_files = master.run(2);
+
+        let expected_files = vec!["reduce.1.result",
+                                  "reduce.2.result",
+                                  "reduce.3.result",
+                                  "reduce.4.result"
+        ].into_iter()
+         .map(|filename| {
+             let mut path = working_directory.clone();
+             path.push(filename);
+             path
+         })
+         .collect::<Vec<PathBuf>>();
+        assert_eq!(result_files, expected_files);
+        let expected_result = vec!["1234".to_string()];
+
+        for path in expected_files {
+            let f = OpenOptions::new()
+                                .read(true)
+                                .open(&path)
+                                .unwrap();
+            let contents = BufReader::new(f).lines()
+                                     .map(|l| l.unwrap_or("".to_string()))
+                                     .collect::<Vec<String>>();
+            assert_eq!(contents, expected_result);
+        }
+
+        for i in 1..(4 + 1) {
+            for j in 1..(4 + 1) {
+                let mut map_file = working_directory.clone();
+                map_file.push(format!("map.{}.reduce.{}", i, j));
+                let _ = remove_file(map_file);
+            }
+            let mut result_file = working_directory.clone();
+            result_file.push(format!("reduce.{}.result", i));
+            let _ = remove_file(result_file);
+        }
     }
 }

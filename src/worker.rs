@@ -2,6 +2,7 @@ use std::io::BufReader;
 use std::fs::{ File, OpenOptions };
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chan::{ Sender, Receiver };
 
@@ -17,16 +18,16 @@ pub enum JobResult {
     ReduceFinished(i32)
 }
 
-struct Worker {
-    working_directory: PathBuf,
-    map: Box<Fn(BufReader<File>) -> Vec<String> + Send>,
-    reduce: Box<Fn(Vec<BufReader<File>>) -> String + Send>,
-    job_queue: Receiver<Job>,
-    results_queue: Sender<JobResult>
+pub struct Worker {
+    pub working_directory: PathBuf,
+    pub map: Arc<Fn(BufReader<File>) -> Vec<String> + Send + Sync>,
+    pub reduce: Arc<Fn(Vec<BufReader<File>>) -> String + Send + Sync>,
+    pub job_queue: Receiver<Job>,
+    pub results_queue: Sender<JobResult>
 }
 
 impl Worker {
-    fn run(&self) {
+    pub fn run(&self) {
         for job in self.job_queue.iter() {
             match job {
                 Job::Map((job_id, path)) => {
@@ -91,6 +92,7 @@ mod test {
     use std::fs::{ File, remove_file };
     use std::path::PathBuf;
     use std::thread;
+    use std::sync::Arc;
 
     use chan;
     use chan::{ Sender, Receiver };
@@ -119,8 +121,8 @@ mod test {
 
         let worker = Worker {
             working_directory: working_directory.clone(),
-            map: Box::new(map_fn),
-            reduce: Box::new(reduce_fn),
+            map: Arc::new(map_fn),
+            reduce: Arc::new(reduce_fn),
             job_queue: work_recv,
             results_queue: results_send
         };
@@ -183,8 +185,8 @@ mod test {
 
         let worker = Worker {
             working_directory: working_directory.clone(),
-            map: Box::new(map_fn),
-            reduce: Box::new(reduce_fn),
+            map: Arc::new(map_fn),
+            reduce: Arc::new(reduce_fn),
             job_queue: work_recv,
             results_queue: results_send
         };
