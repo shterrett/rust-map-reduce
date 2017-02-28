@@ -1,2 +1,5 @@
 target
 Cargo.lock
+test-data/word_count_data/map*
+test-data/word_count_data/reduce*
+test-data/word_count_data/input*

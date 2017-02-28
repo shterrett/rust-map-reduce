@@ -9,7 +9,7 @@ use chan;
 use chan::{ Sender, Receiver };
 use worker::{ Job, JobResult, Worker };
 
-struct Master {
+pub struct Master {
     input_files: Vec<PathBuf>,
     working_directory: PathBuf,
     map: Arc<Fn(BufReader<File>) -> Vec<String> + Send + Sync>,
@@ -21,7 +21,7 @@ struct Master {
 }
 
 impl Master {
-    fn new(working_directory: PathBuf,
+    pub fn new(working_directory: PathBuf,
            input_files: Vec<PathBuf>,
            map: Arc<Fn(BufReader<File>) -> Vec<String> + Send + Sync>,
            reduce: Arc<Fn(Vec<BufReader<File>>) -> String + Send + Sync>
@@ -79,7 +79,7 @@ impl Master {
         }
     }
 
-    fn run(&self, n_workers: i32) -> Vec<PathBuf> {
+    pub fn run(&self, n_workers: i32) -> Vec<PathBuf> {
         self.spawn_workers(n_workers);
 
         let n_map = self.do_map();
@@ -115,8 +115,7 @@ impl Master {
         let mut n_complete = 0;
         while n_complete < n_jobs {
             self.results_queue.recv()
-                              .map(|result| {
-                                  println!("{:?}", result);
+                              .map(|_| {
                                   n_complete += 1
                               });
         }

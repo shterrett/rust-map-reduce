@@ -2,4 +2,4 @@
 extern crate chan;
 
 mod worker;
-mod master;
+pub mod master;
